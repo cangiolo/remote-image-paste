@@ -12,6 +12,7 @@ local DISCOVER = 't=$(command -v tern 2>/dev/null || true); if [ -z "$t" ] && [ 
 
 local busy = false
 local replaying = false
+local cached: string? = nil
 
 local function log(message: string)
 	tern.log.info(message)
@@ -111,24 +112,50 @@ local function host_owning(cx: any, pane_id: number): any?
 	return nil
 end
 
-local function remote_host(host: any): boolean
-	return type(host) == "table"
-		and host.kind == "remote"
-		and (host.state == "connected" or host.state == "stalled")
+local function is_remote(host: any): boolean
+	return type(host) == "table" and host.kind == "remote"
+end
+
+local function first_remote(cx: any): any?
+	local ok, listed = pcall(function()
+		return cx.hosts:list()
+	end)
+	if not ok or type(listed) ~= "table" then
+		return nil
+	end
+	for _, item in listed do
+		if remote_host(item) then
+			return item
+		end
+	end
+	return nil
 end
 
 local function destination(cx: any): (any?, number?, string)
 	local pane_id = focused_id(cx)
 	local host = if pane_id ~= nil then host_owning(cx, pane_id) else nil
-	if not remote_host(host) then
+	if not is_remote(host) then
 		local ok, current = pcall(function()
 			return cx.hosts:current()
 		end)
-		if ok and remote_host(current) then
+		if ok and is_remote(current) then
 			host = current
-		else
-			return nil, pane_id, ""
 		end
+	end
+	if not is_remote(host) and pane_id ~= nil then
+		local pane_ok, pane = pcall(function()
+			return cx.session:pane(pane_id)
+		end)
+		local cwd = if pane_ok and type(pane) == "table" then pane.cwd else nil
+		if type(cwd) == "string" and cwd ~= "" then
+			local exists_ok, exists = pcall(tern.fs.exists, cwd)
+			if not (exists_ok and exists) then
+				host = first_remote(cx)
+			end
+		end
+	end
+	if not is_remote(host) then
+		return nil, pane_id, ""
 	end
 	local block = "@focused"
 	if pane_id ~= nil then
@@ -277,6 +304,10 @@ local function on_paste(cx: any, command_id: string?): boolean
 	end
 	local replay_as = command_id or "canvas.paste"
 	read_image(cx, function(live, path)
+		if path == "" and type(cached) == "string" and local_image(cached) then
+			path = cached
+			log("paste used cached " .. path)
+		end
 		if path ~= "" then
 			deliver(live, host, path, pane_id, block)
 		else
@@ -323,3 +354,21 @@ if macos() then
 	command.keys = { "cmd+alt+shift+i" }
 end
 tern.command(command)
+
+local function watch(cx: any)
+	if not macos() then
+		return
+	end
+	tern.process.run({ "osascript", "-e", FILE_URL }, { timeout_ms = 2000 }, function(result)
+		if result.status == 0 then
+			local path = normalize(result.stdout or "")
+			if local_image(path) and cached ~= path then
+				cached = path
+				log("cached " .. path)
+			end
+		end
+		tern.timer(400, watch)
+	end)
+end
+
+tern.timer(200, watch)
