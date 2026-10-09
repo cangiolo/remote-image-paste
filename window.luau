@@ -266,7 +266,7 @@ local function replay_paste(cx: any, command_id: string?)
 	end
 	replaying = true
 	local ok, err = pcall(function()
-		cx:action(command_id or "canvas.paste")
+		cx:command(command_id or "paste")
 	end)
 	replaying = false
 	if not ok then
@@ -302,7 +302,7 @@ local function on_paste(cx: any, command_id: string?): boolean
 		toast(cx, "info", "Busy")
 		return true
 	end
-	local replay_as = command_id or "canvas.paste"
+	local replay_as = command_id or "paste"
 	read_image(cx, function(live, path)
 		if path == "" and type(cached) == "string" and local_image(cached) then
 			path = cached
@@ -322,11 +322,20 @@ local function send_image(cx: any)
 		return
 	end
 	if not macos() then
-		toast(cx, "error", "macOS only")
+		pcall(function()
+			cx:command("paste")
+		end)
 		return
 	end
-	if not on_paste(cx, "canvas.paste") then
-		toast(cx, "error", "No host")
+	if not on_paste(cx, "paste") then
+		replaying = true
+		local ok, err = pcall(function()
+			cx:command("paste")
+		end)
+		replaying = false
+		if not ok then
+			log("paste failed " .. tostring(err))
+		end
 	end
 end
 
