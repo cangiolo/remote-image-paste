@@ -13,9 +13,16 @@ local DISCOVER = 't=$(command -v tern 2>/dev/null || true); if [ -z "$t" ] && [ 
 local busy = false
 local replaying = false
 local cached: string? = nil
+local handled: { [string]: boolean } = {}
 
 local function log(message: string)
-	tern.log.info(message)
+	tern.log.warn(message)
+end
+
+local function set_clipboard(text: string)
+	pcall(function()
+		tern.process.run({ "/usr/bin/pbcopy" }, { stdin = text, timeout_ms = 2000 }, function() end)
+	end)
 end
 
 local function trim(text: string): string
@@ -217,6 +224,7 @@ local function paste_server_path(cx: any, target: string, pane_id: number?, abs:
 				return
 			end
 			log("injected " .. abs)
+			set_clipboard(abs)
 			toast(live3, "success", "Pasted", abs)
 		end)
 	end)
@@ -365,19 +373,27 @@ end
 tern.command(command)
 
 local function watch(cx: any)
-	if not macos() then
+	if not macos() or cx == nil then
+		tern.timer(100, watch)
 		return
 	end
-	tern.process.run({ "osascript", "-e", FILE_URL }, { timeout_ms = 2000 }, function(result)
+	tern.process.run({ "osascript", "-e", FILE_URL }, { timeout_ms = 2000 }, function(result, cx2)
+		local live = cx2 or cx
 		if result.status == 0 then
 			local path = normalize(result.stdout or "")
-			if local_image(path) and cached ~= path then
+			if local_image(path) then
 				cached = path
-				log("cached " .. path)
+				local host, pane_id, block = destination(live)
+				if host ~= nil and not busy and handled[path] ~= true then
+					handled[path] = true
+					log("claim " .. path)
+					set_clipboard(" ")
+					deliver(live, host, path, pane_id, block)
+				end
 			end
 		end
-		tern.timer(400, watch)
+		tern.timer(100, watch)
 	end)
 end
 
-tern.timer(200, watch)
+tern.timer(100, watch)
