@@ -347,7 +347,7 @@ local function send_image(cx: any)
 	end
 end
 
-for _, command_id in { "paste", "canvas.paste" } do
+for _, command_id in { "paste" } do
 	local override_ok, override_err = pcall(function()
 		tern.override(command_id, function(cx)
 			if on_paste(cx, command_id) then
