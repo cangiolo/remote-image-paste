@@ -154,7 +154,22 @@ local function destination(cx: any): (any?, number?, string)
 			return cx.session:pane(pane_id)
 		end)
 		local cwd = if pane_ok and type(pane) == "table" then pane.cwd else nil
-		if type(cwd) == "string" and cwd ~= "" then
+		if type(cwd) ~= "string" or cwd == "" then
+			local agents_ok, agents = pcall(function()
+				return cx.agents:list()
+			end)
+			if agents_ok and type(agents) == "table" then
+				for _, agent in agents do
+					if type(agent) == "table" and agent.pane == pane_id and type(agent.cwd) == "string" then
+						cwd = agent.cwd
+						break
+					end
+				end
+			end
+		end
+		if type(cwd) ~= "string" or cwd == "" then
+			host = first_remote(cx)
+		else
 			local exists_ok, exists = pcall(tern.fs.exists, cwd)
 			if not (exists_ok and exists) then
 				host = first_remote(cx)
@@ -330,21 +345,21 @@ local function send_image(cx: any)
 		return
 	end
 	if not macos() then
-		pcall(function()
-			cx:command("paste")
-		end)
+		replay_paste(cx, "paste")
 		return
 	end
-	if not on_paste(cx, "paste") then
-		replaying = true
-		local ok, err = pcall(function()
-			cx:command("paste")
-		end)
-		replaying = false
-		if not ok then
-			log("paste failed " .. tostring(err))
+	log("send-image")
+	read_image(cx, function(live, path)
+		if path == "" and type(cached) == "string" and local_image(cached) then
+			path = cached
 		end
-	end
+		local host, pane_id, block = destination(live)
+		if path ~= "" and host ~= nil then
+			deliver(live, host, path, pane_id, block)
+		else
+			replay_paste(live, "paste")
+		end
+	end)
 end
 
 for _, command_id in { "paste" } do
@@ -372,28 +387,19 @@ if macos() then
 end
 tern.command(command)
 
-local function watch(cx: any)
-	if not macos() or cx == nil then
-		tern.timer(100, watch)
+local function watch()
+	if not macos() then
 		return
 	end
-	tern.process.run({ "osascript", "-e", FILE_URL }, { timeout_ms = 2000 }, function(result, cx2)
-		local live = cx2 or cx
+	tern.process.run({ "osascript", "-e", FILE_URL }, { timeout_ms = 2000 }, function(result)
 		if result.status == 0 then
 			local path = normalize(result.stdout or "")
 			if local_image(path) then
 				cached = path
-				local host, pane_id, block = destination(live)
-				if host ~= nil and not busy and handled[path] ~= true then
-					handled[path] = true
-					log("claim " .. path)
-					set_clipboard(" ")
-					deliver(live, host, path, pane_id, block)
-				end
 			end
 		end
-		tern.timer(100, watch)
+		tern.timer(400, watch)
 	end)
 end
 
-tern.timer(100, watch)
+tern.timer(400, watch)
