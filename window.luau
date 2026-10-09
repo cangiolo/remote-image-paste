@@ -278,7 +278,8 @@ local function deliver(cx: any, host: any, local_path: string, pane_id: number?,
 				toast(live3, "error", "Transfer failed", trim(sent.stderr or ""))
 				return
 			end
-			paste_server_path(live3, target, pane_id, abs, block)
+			busy = false
+			log("uploaded " .. abs)
 		end)
 	end)
 end
@@ -354,6 +355,7 @@ local function send_image(cx: any)
 			path = cached
 		end
 		local host, pane_id, block = destination(live)
+		log("send-image path=" .. path .. " host=" .. tostring(host and host.name))
 		if path ~= "" and host ~= nil then
 			deliver(live, host, path, pane_id, block)
 		else
