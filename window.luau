@@ -280,6 +280,7 @@ local function deliver(cx: any, host: any, local_path: string, pane_id: number?,
 			end
 			busy = false
 			log("uploaded " .. abs)
+			toast(live3, "success", "Pasted")
 		end)
 	end)
 end
