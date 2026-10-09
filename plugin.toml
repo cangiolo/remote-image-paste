@@ -1,0 +1,7 @@
+schema = 1
+id = "remote-image-paste"
+name = "Remote Image Paste"
+version = "1.0.0"
+description = "On macOS, upload a clipboard image to the focused remote host and paste the server path into the current pane."
+icon = "image"
+window = "window.luau"
