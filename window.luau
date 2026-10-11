@@ -12,7 +12,6 @@ local DISCOVER = 't=$(command -v tern 2>/dev/null || true); if [ -z "$t" ] && [ 
 
 local busy = false
 local replaying = false
-local cached: string? = nil
 local handled: { [string]: boolean } = {}
 
 local function log(message: string)
@@ -123,59 +122,9 @@ local function is_remote(host: any): boolean
 	return type(host) == "table" and host.kind == "remote"
 end
 
-local function first_remote(cx: any): any?
-	local ok, listed = pcall(function()
-		return cx.hosts:list()
-	end)
-	if not ok or type(listed) ~= "table" then
-		return nil
-	end
-	for _, item in listed do
-		if remote_host(item) then
-			return item
-		end
-	end
-	return nil
-end
-
 local function destination(cx: any): (any?, number?, string)
 	local pane_id = focused_id(cx)
 	local host = if pane_id ~= nil then host_owning(cx, pane_id) else nil
-	if not is_remote(host) then
-		local ok, current = pcall(function()
-			return cx.hosts:current()
-		end)
-		if ok and is_remote(current) then
-			host = current
-		end
-	end
-	if not is_remote(host) and pane_id ~= nil then
-		local pane_ok, pane = pcall(function()
-			return cx.session:pane(pane_id)
-		end)
-		local cwd = if pane_ok and type(pane) == "table" then pane.cwd else nil
-		if type(cwd) ~= "string" or cwd == "" then
-			local agents_ok, agents = pcall(function()
-				return cx.agents:list()
-			end)
-			if agents_ok and type(agents) == "table" then
-				for _, agent in agents do
-					if type(agent) == "table" and agent.pane == pane_id and type(agent.cwd) == "string" then
-						cwd = agent.cwd
-						break
-					end
-				end
-			end
-		end
-		if type(cwd) ~= "string" or cwd == "" then
-			host = first_remote(cx)
-		else
-			local exists_ok, exists = pcall(tern.fs.exists, cwd)
-			if not (exists_ok and exists) then
-				host = first_remote(cx)
-			end
-		end
-	end
 	if not is_remote(host) then
 		return nil, pane_id, ""
 	end
@@ -323,16 +272,8 @@ local function on_paste(cx: any, command_id: string?): boolean
 	if host == nil then
 		return false
 	end
-	if busy then
-		toast(cx, "info", "Busy")
-		return true
-	end
 	local replay_as = command_id or "paste"
 	read_image(cx, function(live, path)
-		if path == "" and type(cached) == "string" and local_image(cached) then
-			path = cached
-			log("paste used cached " .. path)
-		end
 		if path ~= "" then
 			deliver(live, host, path, pane_id, block)
 		else
@@ -350,14 +291,15 @@ local function send_image(cx: any)
 		replay_paste(cx, "paste")
 		return
 	end
+	local host, pane_id, block = destination(cx)
+	if host == nil then
+		replay_paste(cx, "paste")
+		return
+	end
 	log("send-image")
 	read_image(cx, function(live, path)
-		if path == "" and type(cached) == "string" and local_image(cached) then
-			path = cached
-		end
-		local host, pane_id, block = destination(live)
-		log("send-image path=" .. path .. " host=" .. tostring(host and host.name))
-		if path ~= "" and host ~= nil then
+		log("send-image path=" .. path .. " host=" .. tostring(host.name))
+		if path ~= "" then
 			deliver(live, host, path, pane_id, block)
 		else
 			replay_paste(live, "paste")
@@ -389,20 +331,3 @@ if macos() then
 	command.keys = { "cmd+alt+shift+i" }
 end
 tern.command(command)
-
-local function watch()
-	if not macos() then
-		return
-	end
-	tern.process.run({ "osascript", "-e", FILE_URL }, { timeout_ms = 2000 }, function(result)
-		if result.status == 0 then
-			local path = normalize(result.stdout or "")
-			if local_image(path) then
-				cached = path
-			end
-		end
-		tern.timer(400, watch)
-	end)
-end
-
-tern.timer(400, watch)

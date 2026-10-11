@@ -21,6 +21,8 @@ png, jpg, jpeg, gif, and webp only. A pure image on the clipboard is read as a f
 
 Press `Cmd+Option+Shift+I`, or run **Send clipboard image to the current remote** from the palette. `Cmd+V` does the same when a remote host is focused and the clipboard is a local image. Any other paste is replayed unchanged.
 
+The destination must be the remote host that owns the focused pane. Local panes and panes with unknown ownership use native paste without clipboard subprocesses; a missing working directory never selects another host. Only the current clipboard is inspected for remote pastes: previous images are not cached or reused, and ordinary text still passes through while an upload is in progress.
+
 The default chord is `cmd+alt+shift+i`. Change or remove it in Preferences → Keyboard. The command id is `plugin.remote-image-paste.send-image`.
 
 If `tern` is on the remote `PATH`, or at `~/.local/share/tern/build/tern`, the plugin asks that `tern` to paste the server path. That is what lets omp attach the file. If `tern` is missing or the paste fails, the absolute server path is inserted as text instead. Submit the prompt yourself either way.
