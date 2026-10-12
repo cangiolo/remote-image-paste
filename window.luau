@@ -1,6 +1,6 @@
 --!strict
 -- macOS clipboard image -> SSH upload -> paste the server path into the
--- focused remote pane. The Tern display name must already be an ssh target.
+-- originating remote pane. The Tern display name must already be an ssh target.
 
 local EXT: { [string]: boolean } = { png = true, jpg = true, jpeg = true, gif = true, webp = true }
 local FILE_URL = [[try
@@ -8,28 +8,15 @@ POSIX path of (the clipboard as «class furl»)
 on error
 ""
 end try]]
-local DISCOVER = 't=$(command -v tern 2>/dev/null || true); if [ -z "$t" ] && [ -x "$HOME/.local/share/tern/build/tern" ]; then t="$HOME/.local/share/tern/build/tern"; fi; printf %s "$t"'
 
 local busy = false
-local replaying = false
-local handled: { [string]: boolean } = {}
 
 local function log(message: string)
 	tern.log.warn(message)
 end
 
-local function set_clipboard(text: string)
-	pcall(function()
-		tern.process.run({ "/usr/bin/pbcopy" }, { stdin = text, timeout_ms = 2000 }, function() end)
-	end)
-end
-
 local function trim(text: string): string
 	return (string.gsub(text, "^%s*(.-)%s*$", "%1"))
-end
-
-local function shquote(text: string): string
-	return "'" .. string.gsub(text, "'", "'\\''") .. "'"
 end
 
 local function macos(): boolean
@@ -122,79 +109,37 @@ local function is_remote(host: any): boolean
 	return type(host) == "table" and host.kind == "remote"
 end
 
-local function destination(cx: any): (any?, number?, string)
+local function destination(cx: any): (any?, number?)
 	local pane_id = focused_id(cx)
 	local host = if pane_id ~= nil then host_owning(cx, pane_id) else nil
 	if not is_remote(host) then
-		return nil, pane_id, ""
+		return nil, pane_id
 	end
-	local block = "@focused"
-	if pane_id ~= nil then
-		local ok, pane = pcall(function()
-			return cx.session:pane(pane_id)
-		end)
-		if ok and type(pane) == "table" and type(pane.title) == "string" and pane.title ~= "" then
-			block = pane.title
-		end
-	end
-	return host, pane_id, block
+	return host, pane_id
 end
 
-local function insert_path(cx: any, pane_id: number?, text: string): boolean
-	if cx == nil or pane_id == nil then
-		return false
-	end
+local function paste_server_path(cx: any, host: any, pane_id: number, abs: string)
 	local ok, err = pcall(function()
-		cx:run(pane_id, text)
-	end)
-	if not ok then
-		log("insert failed " .. tostring(err))
-	end
-	return ok
-end
-
-local function safe_bin(text: string): string?
-	if text == "" or string.find(text, "\n", 1, true) ~= nil or string.sub(text, 1, 1) == "-" then
-		return nil
-	end
-	return text
-end
-
-local function paste_server_path(cx: any, target: string, pane_id: number?, abs: string, block: string)
-	tern.process.run({ "ssh", "-o", "BatchMode=yes", target, DISCOVER }, { timeout_ms = 15000 }, function(found, cx2)
-		local live = cx2 or cx
-		local bin = safe_bin(trim(found.stdout or ""))
-		if found.status ~= 0 or bin == nil then
-			busy = false
-			if insert_path(live, pane_id, abs) then
-				toast(live, "success", "Path inserted", abs)
-			else
-				toast(live, "error", "Paste failed", abs)
-			end
-			return
+		local owner = host_owning(cx, pane_id)
+		local pane = cx.session:pane(pane_id)
+		if not is_remote(owner) or owner.id ~= host.id or owner.address ~= host.address
+			or owner.state ~= "connected" or pane == nil or pane.exited ~= nil then
+			error("The originating remote pane is no longer available")
 		end
-		local cmd = shquote(bin) .. " send " .. shquote(block) .. " paste " .. shquote(abs)
-		log("inject " .. block .. " <- " .. abs)
-		tern.process.run({ "ssh", "-o", "BatchMode=yes", target, cmd }, { timeout_ms = 15000 }, function(sent, cx3)
-			local live3 = cx3 or live
-			busy = false
-			if sent.status ~= 0 then
-				log("remote paste failed " .. trim(sent.stderr or ""))
-				if insert_path(live3, pane_id, abs) then
-					toast(live3, "success", "Path inserted", abs)
-				else
-					toast(live3, "error", "Paste failed", trim(sent.stderr or ""))
-				end
-				return
-			end
-			log("injected " .. abs)
-			set_clipboard(abs)
-			toast(live3, "success", "Pasted", abs)
-		end)
+		-- WindowCx:run types into this captured pane; only an explicit \r submits.
+		cx:run(pane_id, abs)
 	end)
+	busy = false
+	if not ok then
+		log("paste failed " .. tostring(err))
+		toast(cx, "error", "Uploaded, but paste failed", abs .. " — " .. tostring(err))
+		return
+	end
+	log("inserted " .. abs)
+	toast(cx, "success", "Pasted", abs)
 end
 
-local function deliver(cx: any, host: any, local_path: string, pane_id: number?, block: string)
+local function deliver(cx: any, host: any, local_path: string, pane_id: number)
 	if busy then
 		toast(cx, "info", "Busy")
 		return
@@ -227,25 +172,10 @@ local function deliver(cx: any, host: any, local_path: string, pane_id: number?,
 				toast(live3, "error", "Transfer failed", trim(sent.stderr or ""))
 				return
 			end
-			busy = false
 			log("uploaded " .. abs)
-			toast(live3, "success", "Pasted")
+			paste_server_path(live3, host, pane_id, abs)
 		end)
 	end)
-end
-
-local function replay_paste(cx: any, command_id: string?)
-	if cx == nil then
-		return
-	end
-	replaying = true
-	local ok, err = pcall(function()
-		cx:command(command_id or "paste")
-	end)
-	replaying = false
-	if not ok then
-		log("replay " .. tostring(command_id) .. " failed " .. tostring(err))
-	end
 end
 
 local function read_image(cx: any, done: (any, string) -> ())
@@ -264,61 +194,28 @@ local function read_image(cx: any, done: (any, string) -> ())
 	end)
 end
 
-local function on_paste(cx: any, command_id: string?): boolean
-	if replaying or cx == nil or not macos() then
-		return false
-	end
-	local host, pane_id, block = destination(cx)
-	if host == nil then
-		return false
-	end
-	local replay_as = command_id or "paste"
-	read_image(cx, function(live, path)
-		if path ~= "" then
-			deliver(live, host, path, pane_id, block)
-		else
-			replay_paste(live, replay_as)
-		end
-	end)
-	return true
-end
-
 local function send_image(cx: any)
-	if replaying or cx == nil then
+	if cx == nil then
 		return
 	end
 	if not macos() then
-		replay_paste(cx, "paste")
+		toast(cx, "info", "Image upload requires macOS", "Use ordinary paste for other clipboard content")
 		return
 	end
-	local host, pane_id, block = destination(cx)
-	if host == nil then
-		replay_paste(cx, "paste")
+	local host, pane_id = destination(cx)
+	if host == nil or pane_id == nil then
+		toast(cx, "info", "Select a remote pane to upload an image", "Ordinary paste is unchanged")
 		return
 	end
 	log("send-image")
 	read_image(cx, function(live, path)
 		log("send-image path=" .. path .. " host=" .. tostring(host.name))
 		if path ~= "" then
-			deliver(live, host, path, pane_id, block)
+			deliver(live, host, path, pane_id)
 		else
-			replay_paste(live, "paste")
+			toast(live, "info", "Copy an image file or its absolute path first", "Use Cmd+V for ordinary paste")
 		end
 	end)
-end
-
-for _, command_id in { "paste" } do
-	local override_ok, override_err = pcall(function()
-		tern.override(command_id, function(cx)
-			if on_paste(cx, command_id) then
-				return true
-			end
-			return nil
-		end)
-	end)
-	if not override_ok then
-		log("override " .. command_id .. " failed " .. tostring(override_err))
-	end
 end
 
 local command: { [string]: any } = {
