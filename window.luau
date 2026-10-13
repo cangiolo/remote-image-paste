@@ -126,8 +126,8 @@ local function paste_server_path(cx: any, host: any, pane_id: number, abs: strin
 			or owner.state ~= "connected" or pane == nil or pane.exited ~= nil then
 			error("The originating remote pane is no longer available")
 		end
-		-- WindowCx:run types into this captured pane; only an explicit \r submits.
-		cx:run(pane_id, abs)
+		-- A pasted path invokes omp's attachment loader, not ordinary text input.
+		cx:run(pane_id, "\27[200~" .. abs .. "\27[201~")
 	end)
 	busy = false
 	if not ok then
@@ -140,21 +140,18 @@ local function paste_server_path(cx: any, host: any, pane_id: number, abs: strin
 end
 
 local function deliver(cx: any, host: any, local_path: string, pane_id: number)
-	if busy then
-		toast(cx, "info", "Busy")
-		return
-	end
+	-- The clipboard read already reserved this paste operation.
 	local target = ssh_target(host)
 	if target == "" then
+		busy = false
 		toast(cx, "error", "No host")
 		return
 	end
-	busy = true
 	local name = string.gsub(string.format("paste-%d-%s", math.floor(tern.now()), basename(local_path)), "[^%w%._%-]", "_")
-	local remote_rel = ".omp/image-inbox/" .. name
+	local remote_rel = ".cache/remote-image-paste/" .. name
 	log("upload " .. local_path .. " -> " .. target .. ":" .. remote_rel)
 	toast(cx, "info", "Transferring")
-	local mkdir = 'mkdir -p "$HOME/.omp/image-inbox" && printf %s "$HOME/' .. remote_rel .. '"'
+	local mkdir = 'mkdir -p "$HOME/.cache/remote-image-paste" && printf %s "$HOME/' .. remote_rel .. '"'
 	tern.process.run({ "ssh", "-o", "BatchMode=yes", target, mkdir }, { timeout_ms = 20000 }, function(made, cx2)
 		local live = cx2 or cx
 		if made.status ~= 0 or trim(made.stdout or "") == "" then
@@ -194,6 +191,43 @@ local function read_image(cx: any, done: (any, string) -> ())
 	end)
 end
 
+local function paste_native(cx: any)
+	-- A surface editor's paste action differs from the terminal's built-in paste.
+	local ok, action = pcall(function() return cx.actions:describe("canvas.paste") end)
+	if ok and action.available then
+		cx:action("canvas.paste")
+	else
+		cx:command("paste") -- Built-in dispatch skips overrides.
+	end
+end
+
+local function request_image(cx: any, host: any, pane_id: number, native_paste: boolean)
+	if busy then
+		toast(cx, "info", "Busy")
+		return
+	end
+	busy = true
+	read_image(cx, function(live, path)
+		if path ~= "" then
+			deliver(live, host, path, pane_id)
+			return
+		end
+		busy = false
+		if native_paste then
+			-- Native paste is focus-based. Never replay into a different pane.
+			local current_host, current_pane = destination(live)
+			if current_pane == pane_id and current_host ~= nil
+				and current_host.id == host.id and current_host.address == host.address then
+				paste_native(live)
+			else
+				toast(live, "info", "Paste cancelled: focus changed")
+			end
+		else
+			toast(live, "info", "Copy an image file or its absolute path first", "Use Cmd+V for ordinary paste")
+		end
+	end)
+end
+
 local function send_image(cx: any)
 	if cx == nil then
 		return
@@ -207,15 +241,7 @@ local function send_image(cx: any)
 		toast(cx, "info", "Select a remote pane to upload an image", "Ordinary paste is unchanged")
 		return
 	end
-	log("send-image")
-	read_image(cx, function(live, path)
-		log("send-image path=" .. path .. " host=" .. tostring(host.name))
-		if path ~= "" then
-			deliver(live, host, path, pane_id)
-		else
-			toast(live, "info", "Copy an image file or its absolute path first", "Use Cmd+V for ordinary paste")
-		end
-	end)
+	request_image(cx, host, pane_id, false)
 end
 
 local command: { [string]: any } = {
@@ -228,3 +254,37 @@ if macos() then
 	command.keys = { "cmd+alt+shift+i" }
 end
 tern.command(command)
+
+if macos() then
+	local function paste(cx: any): boolean
+		local host, pane_id = destination(cx)
+		if host == nil or pane_id == nil then
+			return false
+		end
+		-- Clipboard inspection and SSH do not wait on the UI callback.
+		request_image(cx, host, pane_id, true)
+		return true
+	end
+	tern.override("paste", paste)
+	tern.command({
+		id = "paste",
+		title = "Paste with remote image upload",
+		icon = "image",
+		run = function(cx)
+			if not paste(cx) then
+				paste_native(cx)
+			end
+		end,
+	})
+	-- Surface editors consume the default Cmd+V before command overrides.
+	-- An explicit user-keymap action reaches us; retain unrelated custom bindings.
+	tern.timer(0, function(cx)
+		if cx == nil then return end
+		local keys = cx.settings:keybinds()
+		local action = keys["cmd+v"]
+		if action == nil or action == "paste" or action == "canvas.paste"
+			or action == "plugin.remote-image-paste.send-image" then
+			cx.settings:bind("cmd+v", "plugin.remote-image-paste.paste")
+		end
+	end)
+end
